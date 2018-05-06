@@ -18,7 +18,7 @@ from homeassistant.const import (
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import Throttle, slugify
 
-REQUIREMENTS = ['pypollencom==1.1.1']
+REQUIREMENTS = ['pypollencom==1.1.2']
 _LOGGER = logging.getLogger(__name__)
 
 ATTR_ALLERGEN_GENUS = 'primary_allergen_genus'
@@ -105,9 +105,8 @@ RATING_MAPPING = [{
     'maximum': 12
 }]
 
-
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_ZIP_CODE): cv.string,
+    vol.Required(CONF_ZIP_CODE): str,
     vol.Required(CONF_MONITORED_CONDITIONS):
         vol.All(cv.ensure_list, [vol.In(CONDITIONS)]),
 })
@@ -161,7 +160,7 @@ class BaseSensor(Entity):
 
     def __init__(self, data, data_params, name, icon, unique_id):
         """Initialize the sensor."""
-        self._attrs = {}
+        self._attrs = {ATTR_ATTRIBUTION: DEFAULT_ATTRIBUTION}
         self._icon = icon
         self._name = name
         self._data_params = data_params
@@ -173,7 +172,6 @@ class BaseSensor(Entity):
     @property
     def device_state_attributes(self):
         """Return the device state attributes."""
-        self._attrs.update({ATTR_ATTRIBUTION: DEFAULT_ATTRIBUTION})
         return self._attrs
 
     @property
@@ -211,21 +209,23 @@ class AllergyAverageSensor(BaseSensor):
 
         try:
             data_attr = getattr(self.data, self._data_params['data_attr'])
-            indices = [
-                p['Index']
-                for p in data_attr['Location']['periods']
-            ]
+            indices = [p['Index'] for p in data_attr['Location']['periods']]
+            self._attrs[ATTR_TREND] = calculate_trend(indices)
         except KeyError:
             _LOGGER.error("Pollen.com API didn't return any data")
             return
 
+        try:
+            self._attrs[ATTR_CITY] = data_attr['Location']['City'].title()
+            self._attrs[ATTR_STATE] = data_attr['Location']['State']
+            self._attrs[ATTR_ZIP_CODE] = data_attr['Location']['ZIP']
+        except KeyError:
+            _LOGGER.debug('Location data not included in API response')
+            self._attrs[ATTR_CITY] = None
+            self._attrs[ATTR_STATE] = None
+            self._attrs[ATTR_ZIP_CODE] = None
+
         average = round(mean(indices), 1)
-
-        self._attrs[ATTR_TREND] = calculate_trend(indices)
-        self._attrs[ATTR_CITY] = data_attr['Location']['City'].title()
-        self._attrs[ATTR_STATE] = data_attr['Location']['State']
-        self._attrs[ATTR_ZIP_CODE] = data_attr['Location']['ZIP']
-
         [rating] = [
             i['label'] for i in RATING_MAPPING
             if i['minimum'] <= average <= i['maximum']
@@ -245,31 +245,66 @@ class AllergyIndexSensor(BaseSensor):
 
         try:
             location_data = self.data.current_data['Location']
+            [period] = [
+                p for p in location_data['periods']
+                if p['Type'] == self._data_params['key']
+            ]
+            [rating] = [
+                i['label'] for i in RATING_MAPPING
+                if i['minimum'] <= period['Index'] <= i['maximum']
+            ]
+
+            for i in range(3):
+                index = i + 1
+                try:
+                    data = period['Triggers'][i]
+                    self._attrs['{0}_{1}'.format(
+                        ATTR_ALLERGEN_GENUS, index)] = data['Genus']
+                    self._attrs['{0}_{1}'.format(
+                        ATTR_ALLERGEN_NAME, index)] = data['Name']
+                    self._attrs['{0}_{1}'.format(
+                        ATTR_ALLERGEN_TYPE, index)] = data['PlantType']
+                except IndexError:
+                    self._attrs['{0}_{1}'.format(
+                        ATTR_ALLERGEN_GENUS, index)] = None
+                    self._attrs['{0}_{1}'.format(
+                        ATTR_ALLERGEN_NAME, index)] = None
+                    self._attrs['{0}_{1}'.format(
+                        ATTR_ALLERGEN_TYPE, index)] = None
+
+            self._attrs[ATTR_RATING] = rating
+
         except KeyError:
             _LOGGER.error("Pollen.com API didn't return any data")
             return
 
-        [period] = [
-            p for p in location_data['periods']
-            if p['Type'] == self._data_params['key']
-        ]
+        try:
+            self._attrs[ATTR_CITY] = location_data['City'].title()
+            self._attrs[ATTR_STATE] = location_data['State']
+            self._attrs[ATTR_ZIP_CODE] = location_data['ZIP']
+        except KeyError:
+            _LOGGER.debug('Location data not included in API response')
+            self._attrs[ATTR_CITY] = None
+            self._attrs[ATTR_STATE] = None
+            self._attrs[ATTR_ZIP_CODE] = None
 
-        self._attrs[ATTR_ALLERGEN_GENUS] = period['Triggers'][0]['Genus']
-        self._attrs[ATTR_ALLERGEN_NAME] = period['Triggers'][0]['Name']
-        self._attrs[ATTR_ALLERGEN_TYPE] = period['Triggers'][0]['PlantType']
-        self._attrs[ATTR_OUTLOOK] = self.data.outlook_data['Outlook']
-        self._attrs[ATTR_SEASON] = self.data.outlook_data['Season']
-        self._attrs[ATTR_TREND] = self.data.outlook_data[
-            'Trend'].title()
-        self._attrs[ATTR_CITY] = location_data['City'].title()
-        self._attrs[ATTR_STATE] = location_data['State']
-        self._attrs[ATTR_ZIP_CODE] = location_data['ZIP']
+        try:
+            self._attrs[ATTR_OUTLOOK] = self.data.outlook_data['Outlook']
+        except KeyError:
+            _LOGGER.debug('Outlook data not included in API response')
+            self._attrs[ATTR_OUTLOOK] = None
 
-        [rating] = [
-            i['label'] for i in RATING_MAPPING
-            if i['minimum'] <= period['Index'] <= i['maximum']
-        ]
-        self._attrs[ATTR_RATING] = rating
+        try:
+            self._attrs[ATTR_SEASON] = self.data.outlook_data['Season']
+        except KeyError:
+            _LOGGER.debug('Season data not included in API response')
+            self._attrs[ATTR_SEASON] = None
+
+        try:
+            self._attrs[ATTR_TREND] = self.data.outlook_data['Trend'].title()
+        except KeyError:
+            _LOGGER.debug('Trend data not included in API response')
+            self._attrs[ATTR_TREND] = None
 
         self._state = period['Index']
         self._unit = 'index'
@@ -289,8 +324,7 @@ class DataBase(object):
         data = {}
         try:
             data = getattr(getattr(self._client, module), operation)()
-            _LOGGER.debug('Received "%s_%s" data: %s', module,
-                          operation, data)
+            _LOGGER.debug('Received "%s_%s" data: %s', module, operation, data)
         except HTTPError as exc:
             _LOGGER.error('An error occurred while retrieving data')
             _LOGGER.debug(exc)

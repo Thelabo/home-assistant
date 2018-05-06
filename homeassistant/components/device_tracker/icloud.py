@@ -13,7 +13,7 @@ import voluptuous as vol
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.components.device_tracker import (
     PLATFORM_SCHEMA, DOMAIN, ATTR_ATTRIBUTES, ENTITY_ID_FORMAT, DeviceScanner)
-from homeassistant.components.zone import active_zone
+from homeassistant.components.zone.zone import active_zone
 from homeassistant.helpers.event import track_utc_time_change
 import homeassistant.helpers.config_validation as cv
 from homeassistant.util import slugify
@@ -330,7 +330,7 @@ class Icloud(DeviceScanner):
             return
 
         zones = (self.hass.states.get(entity_id) for entity_id
-                 in sorted(self.hass.states.async_entity_ids('zone')))
+                 in sorted(self.hass.states.entity_ids('zone')))
 
         distances = []
         for zone_state in zones:
